@@ -1,0 +1,13 @@
+services:
+  estadisticas:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: sqlite:////app/data/estadisticas.db
+      SEED_ON_START: "true"
+    volumes:
+      - estadisticas-data:/app/data
+
+volumes:
+  estadisticas-data:
