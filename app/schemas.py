@@ -43,8 +43,6 @@ class MateriaResumen(BaseModel):
 
 
 class EstadisticasUsuario(BaseModel):
-    model_config = ConfigDict(exclude_none=True)
-
     usuario_id: int
     nombre: str
     periodo: str | None = None
@@ -52,11 +50,14 @@ class EstadisticasUsuario(BaseModel):
     grupos: GruposResumen
     materias: list[MateriaResumen]
     fecha_calculo: str
+    # Solo aparecen cuando alguna dependencia no respondió y se sirve la caché (contrato I.7).
+    # Zod descarta claves desconocidas por defecto, así que no rompen estadisticasUsuarioSchema.
+    en_cache: bool | None = None
+    actualizado_en: str | None = None
+    dependencias_no_disponibles: list[str] | None = None
 
 
 class EstadisticasMateria(BaseModel):
-    model_config = ConfigDict(exclude_none=True)
-
     materia_id: int
     nombre: str
     nrc: str | None = None

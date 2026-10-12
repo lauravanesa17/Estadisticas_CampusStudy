@@ -1,11 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import MateriaProyeccion, UsuarioProyeccion
+from app.models import MateriaProyeccion, TareaProyeccion, UsuarioProyeccion
 from app.schemas import CatalogoItem, EstadisticasGrupo, EstadisticasMateria, EstadisticasUsuario
 from app.services.agregador import estadisticas_grupo, estadisticas_materia, estadisticas_usuario
-from app.services.sincronizacion import refrescar_usuario
+from app.services.sincronizacion import ResultadoSincronizacion, refrescar_usuario
 
 router = APIRouter(prefix="/api/v1/estadisticas", tags=["estadisticas"])
 
@@ -17,25 +17,44 @@ def _error(codigo: int, mensaje: str, dependencia: str | None = None) -> HTTPExc
     return HTTPException(status_code=codigo, detail=detalle)
 
 
+def _sin_datos_en_cache(db: Session, usuario_id: int, sincronizacion: ResultadoSincronizacion) -> bool:
+    """True si servir la caché significaría inventar datos (contrato I.5/I.7: no asumir ceros)."""
+    if not db.get(UsuarioProyeccion, usuario_id):
+        return True
+    if "tareas-service" in sincronizacion.fallidos:
+        nunca_sincronizadas = not (sincronizacion.registro and sincronizacion.registro.tareas_en)
+        sin_tareas_locales = not db.query(TareaProyeccion.id).filter_by(usuario_id=usuario_id).first()
+        return nunca_sincronizadas and sin_tareas_locales
+    return False
+
+
 @router.get("/usuario/{usuario_id}", response_model=EstadisticasUsuario, response_model_exclude_none=True)
 def reporte_usuario(
     usuario_id: int,
+    response: Response,
     periodo: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}$"),
     materia_id: int | None = Query(default=None, gt=0),
+    authorization: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ) -> EstadisticasUsuario:
     if usuario_id <= 0:
         raise _error(400, "Solicitud incorrecta (parámetro inválido, ej. usuario_id no numérico).")
 
-    try:
-        refrescar_usuario(db, usuario_id)
-    except ConnectionError:
-        if not db.get(UsuarioProyeccion, usuario_id):
-            raise _error(503, "estadísticas no disponibles por el momento", "usuarios-service") from None
+    sincronizacion = refrescar_usuario(db, usuario_id, authorization)
+    if sincronizacion.fallidos and _sin_datos_en_cache(db, usuario_id, sincronizacion):
+        raise _error(503, "estadísticas no disponibles por el momento", ", ".join(sincronizacion.fallidos))
 
     reporte = estadisticas_usuario(db, usuario_id, periodo=periodo, materia_id=materia_id)
     if not reporte:
         raise _error(404, "Usuario no encontrado.")
+
+    if sincronizacion.fallidos:
+        reporte.en_cache = True
+        reporte.dependencias_no_disponibles = sincronizacion.fallidos
+        ultima = sincronizacion.ultima_actualizacion_de_fallidos()
+        if ultima:
+            reporte.actualizado_en = ultima.isoformat(timespec="seconds")
+        response.headers["X-Datos-En-Cache"] = "true"
     return reporte
 
 

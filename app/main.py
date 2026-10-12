@@ -1,11 +1,12 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import settings
 from app.database import SessionLocal, init_db
@@ -55,8 +56,10 @@ async def validacion_invalida(_request: Request, _exc: RequestValidationError) -
     )
 
 
-@app.exception_handler(HTTPException)
-async def error_http(_request: Request, exc: HTTPException) -> JSONResponse:
+# Se registra sobre la clase de Starlette para cubrir también los 404/405 de rutas
+# inexistentes, que no pasan por el HTTPException de FastAPI.
+@app.exception_handler(StarletteHTTPException)
+async def error_http(_request: Request, exc: StarletteHTTPException) -> JSONResponse:
     if isinstance(exc.detail, dict):
         return JSONResponse(status_code=exc.status_code, content=exc.detail)
     return JSONResponse(

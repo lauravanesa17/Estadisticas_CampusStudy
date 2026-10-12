@@ -193,3 +193,40 @@ def test_reporte_grupo(client):
     assert cuerpo["grupo_id"] == 7
     assert cuerpo["integrantes"] == 1
     assert cuerpo["tareas"]["completadas"] == 1
+
+
+def test_filtro_periodo(client):
+    _registrar_base(client)
+    for tarea_id, fecha in ((1, "2026-11-05"), (2, "2026-12-05")):
+        client.post("/api/v1/eventos", json={
+            "evento_id": f"t-{tarea_id}",
+            "evento": "tarea.creada",
+            "payload": {"tarea_id": tarea_id, "titulo": "P", "usuario_id": 25, "materia_id": 4,
+                        "estado": "pendiente", "fecha_entrega": fecha},
+        })
+    cuerpo = client.get("/api/v1/estadisticas/usuario/25?periodo=2026-11").json()
+    assert cuerpo["periodo"] == "2026-11"
+    assert cuerpo["tareas"]["total"] == 1
+
+
+def test_periodo_invalido_400(client):
+    assert client.get("/api/v1/estadisticas/usuario/25?periodo=2026-1").status_code == 400
+
+
+def test_reporte_materia(client):
+    _registrar_base(client)
+    client.post("/api/v1/eventos", json={
+        "evento_id": "t-m",
+        "evento": "tarea.creada",
+        "payload": {"tarea_id": 5, "titulo": "M", "usuario_id": 25, "materia_id": 4,
+                    "estado": "completada", "fecha_entrega": "2026-10-10"},
+    })
+    cuerpo = client.get("/api/v1/estadisticas/materia/4").json()
+    assert cuerpo["nrc"] == "12345"
+    assert cuerpo["tareas"]["porcentaje_completado"] == 100.0
+
+
+def test_ruta_inexistente_usa_formato_de_error(client):
+    respuesta = client.get("/api/v1/no-existe")
+    assert respuesta.status_code == 404
+    assert respuesta.json()["codigo"] == 404

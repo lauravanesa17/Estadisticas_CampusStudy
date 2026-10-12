@@ -1,5 +1,9 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
+
+# El contrato fija hora de Colombia (UTC-5). Colombia no tiene horario de verano,
+# así que un offset fijo es exacto y no depende de tzdata (que falta en Windows).
+ZONA_COLOMBIA = timezone(timedelta(hours=-5), name="America/Bogota")
 
 ESTADOS_CERRADOS = {"completada", "cancelada"}
 ALIAS_ESTADO = {
@@ -8,8 +12,13 @@ ALIAS_ESTADO = {
 }
 
 
+def _reloj() -> datetime:
+    return datetime.now(ZONA_COLOMBIA)
+
+
 def ahora() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    """Fecha y hora actual en Colombia, sin tzinfo (igual que lo que se guarda en la BD)."""
+    return _reloj().astimezone(ZONA_COLOMBIA).replace(tzinfo=None)
 
 
 def hoy_iso() -> str:
@@ -21,11 +30,17 @@ def normalizar_estado(estado: object) -> str:
     return ALIAS_ESTADO.get(texto, texto or "pendiente")
 
 
+def _a_colombia(valor: datetime) -> datetime:
+    if valor.tzinfo:
+        return valor.astimezone(ZONA_COLOMBIA).replace(tzinfo=None)
+    return valor
+
+
 def parsear_fecha(valor: object) -> datetime | None:
     if valor is None or valor == "":
         return None
     if isinstance(valor, datetime):
-        return valor.replace(tzinfo=None) if valor.tzinfo else valor
+        return _a_colombia(valor)
     texto = str(valor).replace("Z", "+00:00")
     if len(texto) == 10 and texto[4] == "-" and texto[7] == "-":
         texto = f"{texto}T23:59:00"
@@ -33,7 +48,7 @@ def parsear_fecha(valor: object) -> datetime | None:
         parsed = datetime.fromisoformat(texto)
     except ValueError:
         return None
-    return parsed.replace(tzinfo=None) if parsed.tzinfo else parsed
+    return _a_colombia(parsed)
 
 
 def parsear_fecha_entrega(fecha: object, hora: object = None) -> datetime | None:
@@ -47,11 +62,14 @@ def parsear_fecha_entrega(fecha: object, hora: object = None) -> datetime | None
 
 
 def estado_efectivo(estado: str, fecha_entrega: datetime | None, momento: datetime | None = None) -> str:
-    """vencida es un conteo derivado: no es un estado persistido por tareas-service."""
+    """vencida es un conteo derivado: no es un estado persistido por tareas-service.
+
+    Se compara fecha y hora de entrega (hora Colombia); sin hora_entrega vence a las 23:59.
+    """
     canonico = normalizar_estado(estado)
     if canonico in ESTADOS_CERRADOS:
         return canonico
     referencia = momento or ahora()
-    if fecha_entrega and fecha_entrega.date() < referencia.date():
+    if fecha_entrega and fecha_entrega < referencia:
         return "vencida"
     return canonico or "pendiente"

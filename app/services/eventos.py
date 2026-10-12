@@ -17,9 +17,16 @@ from app.services.ids import entero_id, primer_id
 from app.services.tiempo import ahora, normalizar_estado, parsear_fecha, parsear_fecha_entrega
 
 
-def aplicar_proyeccion(db: Session, tipo: str, payload: dict, occurred_at: datetime | None = None) -> None:
+def aplicar_proyeccion(
+    db: Session,
+    tipo: str,
+    payload: dict,
+    occurred_at: datetime | None = None,
+    commit: bool = True,
+) -> None:
     _aplicar(db, tipo, payload, occurred_at)
-    db.commit()
+    if commit:
+        db.commit()
 
 
 def procesar_evento(db: Session, entrada: EventoEntrada) -> EventoRespuesta:
@@ -103,11 +110,21 @@ def _grupo(db: Session, payload: dict, _: datetime | None) -> None:
     grupo.materia_id = primer_id(payload.get("materia_id"), payload.get("materiaId"), grupo.materia_id) or grupo.materia_id
     grupo.creado_por = primer_id(payload.get("creado_por"), payload.get("creadoPor"), grupo.creado_por) or grupo.creado_por
     db.merge(grupo)
-    for integrante in payload.get("integrantes") or []:
-        if isinstance(integrante, dict):
-            _miembro(db, {"grupo_id": grupo_id, **integrante}, None)
-        else:
-            _miembro(db, {"grupo_id": grupo_id, "usuario_id": integrante}, None)
+    if not isinstance(payload.get("integrantes"), list):
+        return
+    vigentes: set[int] = set()
+    for integrante in payload["integrantes"]:
+        datos = {"grupo_id": grupo_id, **integrante} if isinstance(integrante, dict) else {"grupo_id": grupo_id, "usuario_id": integrante}
+        usuario_id = primer_id(datos.get("usuario_id"), datos.get("usuarioId"), datos.get("id"))
+        if usuario_id:
+            vigentes.add(usuario_id)
+        _miembro(db, datos, None)
+    # grupos-service envía la lista completa: quien ya no aparece salió del grupo.
+    db.flush()
+    db.query(MiembroGrupo).filter(
+        MiembroGrupo.grupo_id == grupo_id,
+        MiembroGrupo.usuario_id.notin_(vigentes),
+    ).delete(synchronize_session=False)
 
 
 def _miembro(db: Session, payload: dict, _: datetime | None) -> None:

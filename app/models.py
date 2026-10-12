@@ -4,6 +4,7 @@ from sqlalchemy import DateTime, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
+from app.services.tiempo import ahora
 
 
 class EventoRecibido(Base):
@@ -13,7 +14,7 @@ class EventoRecibido(Base):
     evento_id: Mapped[str] = mapped_column(String(80), unique=True, index=True)
     tipo: Mapped[str] = mapped_column(String(80), index=True)
     payload_json: Mapped[str] = mapped_column(Text)
-    recibido_en: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    recibido_en: Mapped[datetime] = mapped_column(DateTime, default=ahora)
 
 
 class UsuarioProyeccion(Base):
@@ -65,3 +66,15 @@ class TareaProyeccion(Base):
     fecha_entrega: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     fecha_completada: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     creado_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class SincronizacionUsuario(Base):
+    """Cuándo se consultó por última vez a cada servicio para un usuario (vigencia de la caché)."""
+
+    __tablename__ = "sincronizacion_usuarios"
+
+    usuario_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    usuario_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    tareas_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    materias_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    grupos_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
