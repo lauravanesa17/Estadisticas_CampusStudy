@@ -130,7 +130,7 @@ function pintar(reporte, etiqueta) {
   notaEl.textContent = `${tareas.total} tareas · fecha de cálculo ${reporte.fecha_calculo}`;
   drawCharts(tareas, materias);
   renderMaterias(materias, tareas);
-  statusEl.textContent = "Caché local en SQLite · este servicio no es dueño de las tareas, solo las agrega.";
+  statusEl.textContent = "";
 }
 
 async function cargar() {
@@ -153,7 +153,7 @@ async function cargar() {
       return;
     }
     tituloEl.textContent = "Sin datos";
-    statusEl.textContent = "No hay usuarios en la caché local.";
+    statusEl.textContent = "No hay usuarios registrados.";
   } catch (error) {
     tituloEl.textContent = "No se pudo cargar el reporte";
     statusEl.textContent = error.message;
