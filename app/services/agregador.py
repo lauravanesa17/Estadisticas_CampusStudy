@@ -1,8 +1,8 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session
 
-from app.models import GrupoProyeccion, MateriaProyeccion, MiembroGrupo, TareaProyeccion, UsuarioProyeccion
+from app.models import GrupoProyeccion, MateriaProyeccion, MiembroGrupo, TareaProyeccion
 from app.schemas import (
     EstadisticasGrupo,
     EstadisticasMateria,
@@ -13,6 +13,9 @@ from app.schemas import (
 )
 from app.services.tiempo import ahora, estado_efectivo, hoy_iso
 
+# Un grupo está activo si tiene al menos una tarea sin cerrar
+ESTADOS_ABIERTOS = {"pendiente", "en_progreso", "vencida"}
+
 
 def _tareas(
     db: Session,
@@ -21,96 +24,91 @@ def _tareas(
     grupo_id: int | None = None,
     periodo: str | None = None,
 ) -> list[TareaProyeccion]:
-    consulta = db.query(TareaProyeccion)
-    if usuario_id:
-        consulta = consulta.filter(TareaProyeccion.usuario_id == usuario_id)
-    if materia_id:
-        consulta = consulta.filter(TareaProyeccion.materia_id == materia_id)
-    if grupo_id:
-        consulta = consulta.filter(TareaProyeccion.grupo_id == grupo_id)
-    filas = consulta.all()
+    # Solo se filtra por lo que vino: None significa "sin filtro"
+    criterios = {"usuario_id": usuario_id, "materia_id": materia_id, "grupo_id": grupo_id}
+    consulta = db.query(TareaProyeccion).filter_by(**{k: v for k, v in criterios.items() if v is not None})
+
     if periodo:
-        filas = [
-            tarea
-            for tarea in filas
-            if tarea.fecha_entrega and tarea.fecha_entrega.strftime("%Y-%m") == periodo
-        ]
-    return filas
+        inicio, fin = _rango_del_mes(periodo)
+        consulta = consulta.filter(TareaProyeccion.fecha_entrega >= inicio, TareaProyeccion.fecha_entrega < fin)
+
+    return consulta.all()
 
 
-def resumen_tareas(tareas: list[TareaProyeccion], momento: datetime | None = None) -> TareasResumen:
-    referencia = momento or ahora()
-    activas = [tarea for tarea in tareas if estado_efectivo(tarea.estado, tarea.fecha_entrega, referencia) != "cancelada"]
-    completadas = 0
-    vencidas = 0
-    for tarea in activas:
-        efectivo = estado_efectivo(tarea.estado, tarea.fecha_entrega, referencia)
-        if efectivo == "completada":
-            completadas += 1
-        elif efectivo == "vencida":
-            vencidas += 1
-    total = len(activas)
-    pendientes = total - completadas - vencidas
-    porcentaje = round((completadas / total) * 100, 1) if total else 0.0
+def _rango_del_mes(periodo: str) -> tuple[datetime, datetime]:
+    """"2026-11" → (1 de noviembre, 1 de diciembre): el inicio entra, el fin no."""
+    inicio = datetime.strptime(periodo, "%Y-%m")
+    return inicio, (inicio + timedelta(days=32)).replace(day=1)
+
+
+def resumen_tareas(tareas: list[TareaProyeccion], momento: datetime) -> TareasResumen:
+    estados = [estado_efectivo(t.estado, t.fecha_entrega, momento) for t in tareas]
+    estados = [e for e in estados if e != "cancelada"]
+
+    total = len(estados)
+    completadas = estados.count("completada")
+    vencidas = estados.count("vencida")
+
     return TareasResumen(
         total=total,
         completadas=completadas,
-        pendientes=pendientes,
+        pendientes=total - completadas - vencidas,  # pendiente + en_progreso (contrato I.6)
         vencidas=vencidas,
-        porcentaje_completado=porcentaje,
+        porcentaje_completado=round(completadas / total * 100, 1) if total else 0.0,
     )
 
 
-def _grupos_usuario(db: Session, usuario_id: int, tareas: list[TareaProyeccion], momento: datetime) -> GruposResumen:
-    ids = {fila.grupo_id for fila in db.query(MiembroGrupo).filter_by(usuario_id=usuario_id).all()}
-    ids.update(tarea.grupo_id for tarea in tareas if tarea.grupo_id)
-    activos = set()
-    for tarea in tareas:
-        if not tarea.grupo_id:
-            continue
-        efectivo = estado_efectivo(tarea.estado, tarea.fecha_entrega, momento)
-        if efectivo in {"pendiente", "en_progreso", "vencida"}:
-            activos.add(tarea.grupo_id)
-    return GruposResumen(total_grupos=len(ids), grupos_activos=len(activos))
+def _grupos_activos(tareas: list[TareaProyeccion], momento: datetime) -> set[int]:
+    return {
+        t.grupo_id
+        for t in tareas
+        if t.grupo_id and estado_efectivo(t.estado, t.fecha_entrega, momento) in ESTADOS_ABIERTOS
+    }
 
 
 def _materias_usuario(db: Session, tareas: list[TareaProyeccion], momento: datetime) -> list[MateriaResumen]:
-    agrupadas: dict[int, list[TareaProyeccion]] = {}
+    por_materia: dict[int, list[TareaProyeccion]] = {}
     for tarea in tareas:
-        if tarea.materia_id:
-            agrupadas.setdefault(tarea.materia_id, []).append(tarea)
-    resultado: list[MateriaResumen] = []
-    for materia_id, items in agrupadas.items():
-        materia = db.get(MateriaProyeccion, materia_id)
+        por_materia.setdefault(tarea.materia_id, []).append(tarea)
+
+    # Una sola consulta para todos los nombres, no una por materia
+    nombres = {
+        m.id: m.nombre
+        for m in db.query(MateriaProyeccion).filter(MateriaProyeccion.id.in_(por_materia))
+    }
+
+    resultado = []
+    for materia_id, items in por_materia.items():
         conteo = resumen_tareas(items, momento)
-        resultado.append(
-            MateriaResumen(
-                materia_id=materia_id,
-                nombre=materia.nombre if materia and materia.nombre else f"Materia {materia_id}",
-                tareas_completadas=conteo.completadas,
-                tareas_total=conteo.total,
-            )
-        )
-    return sorted(resultado, key=lambda item: item.tareas_total, reverse=True)
+        resultado.append(MateriaResumen(
+            materia_id=materia_id,
+            nombre=nombres.get(materia_id) or f"Materia {materia_id}",
+            tareas_completadas=conteo.completadas,
+            tareas_total=conteo.total,
+        ))
+    return sorted(resultado, key=lambda m: m.tareas_total, reverse=True)
 
 
 def estadisticas_usuario(
     db: Session,
     usuario_id: int,
+    nombre: str,
     periodo: str | None = None,
     materia_id: int | None = None,
-) -> EstadisticasUsuario | None:
-    usuario = db.get(UsuarioProyeccion, usuario_id)
-    if not usuario:
-        return None
+) -> EstadisticasUsuario:
     momento = ahora()
     tareas = _tareas(db, usuario_id=usuario_id, materia_id=materia_id, periodo=periodo)
+    mis_grupos = {m.grupo_id for m in db.query(MiembroGrupo).filter_by(usuario_id=usuario_id)}
+
     return EstadisticasUsuario(
         usuario_id=usuario_id,
-        nombre=usuario.nombre or f"Usuario {usuario_id}",
+        nombre=nombre,
         periodo=periodo,
         tareas=resumen_tareas(tareas, momento),
-        grupos=_grupos_usuario(db, usuario_id, tareas, momento),
+        grupos=GruposResumen(
+            total_grupos=len(mis_grupos),
+            grupos_activos=len(_grupos_activos(tareas, momento) & mis_grupos),
+        ),
         materias=_materias_usuario(db, tareas, momento),
         fecha_calculo=hoy_iso(),
     )
@@ -120,21 +118,18 @@ def estadisticas_materia(db: Session, materia_id: int, periodo: str | None = Non
     materia = db.get(MateriaProyeccion, materia_id)
     if not materia:
         return None
+
     momento = ahora()
     tareas = _tareas(db, materia_id=materia_id, periodo=periodo)
-    grupos = db.query(GrupoProyeccion).filter_by(materia_id=materia_id).all()
-    activos = {
-        tarea.grupo_id
-        for tarea in tareas
-        if tarea.grupo_id and estado_efectivo(tarea.estado, tarea.fecha_entrega, momento) in {"pendiente", "en_progreso", "vencida"}
-    }
+    grupos = db.query(GrupoProyeccion).filter_by(materia_id=materia_id).count()
+
     return EstadisticasMateria(
         materia_id=materia_id,
-        nombre=materia.nombre or f"Materia {materia_id}",
+        nombre=materia.nombre,
         nrc=materia.nrc or None,
         periodo=periodo,
         tareas=resumen_tareas(tareas, momento),
-        grupos=GruposResumen(total_grupos=len(grupos), grupos_activos=len(activos)),
+        grupos=GruposResumen(total_grupos=grupos, grupos_activos=len(_grupos_activos(tareas, momento))),
         fecha_calculo=hoy_iso(),
     )
 
@@ -143,13 +138,12 @@ def estadisticas_grupo(db: Session, grupo_id: int) -> EstadisticasGrupo | None:
     grupo = db.get(GrupoProyeccion, grupo_id)
     if not grupo:
         return None
-    tareas = _tareas(db, grupo_id=grupo_id)
-    integrantes = db.query(MiembroGrupo).filter_by(grupo_id=grupo_id).count()
+
     return EstadisticasGrupo(
         grupo_id=grupo_id,
-        nombre=grupo.nombre or f"Grupo {grupo_id}",
+        nombre=grupo.nombre,
         materia_id=grupo.materia_id,
-        integrantes=integrantes,
-        tareas=resumen_tareas(tareas),
+        integrantes=db.query(MiembroGrupo).filter_by(grupo_id=grupo_id).count(),
+        tareas=resumen_tareas(_tareas(db, grupo_id=grupo_id), ahora()),
         fecha_calculo=hoy_iso(),
     )

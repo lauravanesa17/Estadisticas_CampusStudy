@@ -1,98 +1,57 @@
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import MateriaProyeccion, TareaProyeccion, UsuarioProyeccion
-from app.schemas import CatalogoItem, EstadisticasGrupo, EstadisticasMateria, EstadisticasUsuario
-from app.services.agregador import estadisticas_grupo, estadisticas_materia, estadisticas_usuario
-from app.services.sincronizacion import ResultadoSincronizacion, refrescar_usuario
+from app.schemas import EstadisticasGrupo, EstadisticasMateria, EstadisticasUsuario
+from app.security import UsuarioActual
+from app.services.agregador import (
+    estadisticas_grupo,
+    estadisticas_materia,
+    estadisticas_usuario,
+)
 
 router = APIRouter(prefix="/api/v1/estadisticas", tags=["estadisticas"])
 
-
-def _error(codigo: int, mensaje: str, dependencia: str | None = None) -> HTTPException:
-    detalle: dict = {"codigo": codigo, "mensaje": mensaje}
-    if dependencia:
-        detalle["dependencia"] = dependencia
-    return HTTPException(status_code=codigo, detail=detalle)
+Db = Annotated[Session, Depends(get_db)]
+Periodo = Annotated[str | None, Query(pattern=r"^\d{4}-\d{2}$", description="YYYY-MM")]
 
 
-def _sin_datos_en_cache(db: Session, usuario_id: int, sincronizacion: ResultadoSincronizacion) -> bool:
-    """True si servir la caché significaría inventar datos (contrato I.5/I.7: no asumir ceros)."""
-    if not db.get(UsuarioProyeccion, usuario_id):
-        return True
-    if "tareas-service" in sincronizacion.fallidos:
-        nunca_sincronizadas = not (sincronizacion.registro and sincronizacion.registro.tareas_en)
-        sin_tareas_locales = not db.query(TareaProyeccion.id).filter_by(usuario_id=usuario_id).first()
-        return nunca_sincronizadas and sin_tareas_locales
-    return False
+def _no_encontrado(recurso: str) -> HTTPException:
+    return HTTPException(status_code=404, detail={"codigo": 404, "mensaje": f"{recurso} no encontrado"})
 
 
-@router.get("/usuario/{usuario_id}", response_model=EstadisticasUsuario, response_model_exclude_none=True)
-def reporte_usuario(
-    usuario_id: int,
-    response: Response,
-    periodo: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}$"),
-    materia_id: int | None = Query(default=None, gt=0),
-    authorization: str | None = Header(default=None),
-    db: Session = Depends(get_db),
+@router.get("/me", response_model=EstadisticasUsuario, response_model_exclude_none=True)
+def mi_reporte(
+    usuario: UsuarioActual,
+    db: Db,
+    periodo: Periodo = None,
+    materia_id: Annotated[int | None, Query(gt=0)] = None,
 ) -> EstadisticasUsuario:
-    if usuario_id <= 0:
-        raise _error(400, "Solicitud incorrecta (parámetro inválido, ej. usuario_id no numérico).")
-
-    sincronizacion = refrescar_usuario(db, usuario_id, authorization)
-    if sincronizacion.fallidos and _sin_datos_en_cache(db, usuario_id, sincronizacion):
-        raise _error(503, "estadísticas no disponibles por el momento", ", ".join(sincronizacion.fallidos))
-
-    reporte = estadisticas_usuario(db, usuario_id, periodo=periodo, materia_id=materia_id)
-    if not reporte:
-        raise _error(404, "Usuario no encontrado.")
-
-    if sincronizacion.fallidos:
-        reporte.en_cache = True
-        reporte.dependencias_no_disponibles = sincronizacion.fallidos
-        ultima = sincronizacion.ultima_actualizacion_de_fallidos()
-        if ultima:
-            reporte.actualizado_en = ultima.isoformat(timespec="seconds")
-        response.headers["X-Datos-En-Cache"] = "true"
-    return reporte
+    return estadisticas_usuario(db, usuario.usuario_id, usuario.nombre, periodo, materia_id)
 
 
 @router.get("/materia/{materia_id}", response_model=EstadisticasMateria, response_model_exclude_none=True)
 def reporte_materia(
-    materia_id: int,
-    periodo: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}$"),
-    db: Session = Depends(get_db),
+    materia_id: Annotated[int, Path(gt=0)],
+    usuario: UsuarioActual,
+    db: Db,
+    periodo: Periodo = None,
 ) -> EstadisticasMateria:
-    if materia_id <= 0:
-        raise _error(400, "Solicitud incorrecta (parámetro inválido).")
-    reporte = estadisticas_materia(db, materia_id, periodo=periodo)
+    reporte = estadisticas_materia(db, materia_id, usuario.usuario_id, periodo)
     if not reporte:
-        raise _error(404, "Materia no encontrada.")
+        raise _no_encontrado("Materia")
     return reporte
 
 
 @router.get("/grupo/{grupo_id}", response_model=EstadisticasGrupo)
-def reporte_grupo(grupo_id: int, db: Session = Depends(get_db)) -> EstadisticasGrupo:
-    if grupo_id <= 0:
-        raise _error(400, "Solicitud incorrecta (parámetro inválido).")
-    reporte = estadisticas_grupo(db, grupo_id)
+def reporte_grupo(
+    grupo_id: Annotated[int, Path(gt=0)],
+    usuario: UsuarioActual,
+    db: Db,
+) -> EstadisticasGrupo:
+    reporte = estadisticas_grupo(db, grupo_id, usuario.usuario_id)
     if not reporte:
-        raise _error(404, "Grupo no encontrado.")
+        raise _no_encontrado("Grupo")
     return reporte
-
-
-@router.get("/catalogo/usuarios", response_model=list[CatalogoItem], include_in_schema=False)
-def catalogo_usuarios(db: Session = Depends(get_db)) -> list[CatalogoItem]:
-    return [
-        CatalogoItem(id=item.id, nombre=item.nombre or str(item.id), extra=item.email)
-        for item in db.query(UsuarioProyeccion).all()
-    ]
-
-
-@router.get("/catalogo/materias", response_model=list[CatalogoItem], include_in_schema=False)
-def catalogo_materias(db: Session = Depends(get_db)) -> list[CatalogoItem]:
-    return [
-        CatalogoItem(id=item.id, nombre=item.nombre or str(item.id), extra=item.nrc)
-        for item in db.query(MateriaProyeccion).all()
-    ]

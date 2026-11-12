@@ -1,26 +1,65 @@
-from datetime import datetime
-from typing import Any
+from datetime import date, time
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
+
+Id = Annotated[int, Field(gt=0)]
 
 
-class EventoEntrada(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
+# ---------- Eventos que recibe (contrato con tareas, grupos y materias) ----------
 
-    evento_id: str | None = Field(default=None, alias="eventoId")
-    evento: str
-    version: str = "1.0"
-    occurred_at: datetime | None = Field(default=None, alias="occurredAt")
-    payload: dict[str, Any] = Field(default_factory=dict)
+class TareaPayload(BaseModel):
+    tarea_id: Id
+    usuario_id: Id
+    materia_id: Id
+    grupo_id: Id | None = None
+    estado: Literal["pendiente", "en_progreso", "completada", "cancelada"]
+    fecha_entrega: date
+    hora_entrega: time | None = None
+
+
+class IntegrantePayload(BaseModel):
+    usuario_id: Id
+
+
+class GrupoPayload(BaseModel):
+    grupo_id: Id
+    nombre: str
+    materia_id: Id
+    integrantes: list[IntegrantePayload]
+class MateriaPayload(BaseModel):
+    materia_id: Id
+    nombre: str
+    nrc: str = Field(min_length=1, max_length=20)
+
+class EventoTarea(BaseModel):
+    evento_id: str = Field(min_length=1, max_length=80)
+    evento: Literal["tarea.creada", "tarea.actualizada", "tarea.estado_cambiado"]
+    payload: TareaPayload
+
+
+class EventoGrupo(BaseModel):
+    evento_id: str = Field(min_length=1, max_length=80)
+    evento: Literal["grupo.creado", "grupo.actualizado"]
+    payload: GrupoPayload
+
+
+class EventoMateria(BaseModel):
+    evento_id: str = Field(min_length=1, max_length=80)
+    evento: Literal["materia.creada", "materia.actualizada"]
+    payload: MateriaPayload
+
+
+# Según "evento", Pydantic sabe qué forma debe tener "payload"
+EventoEntrada = Annotated[EventoTarea | EventoGrupo | EventoMateria, Field(discriminator="evento")]
 
 
 class EventoRespuesta(BaseModel):
-    aceptado: bool
-    duplicado: bool = False
     evento_id: str
-    tipo: str
-    mensaje: str
+    duplicado: bool
 
+
+# ---------- Reportes que entrega (contrato I.10, schema Zod del front) ----------
 
 class TareasResumen(BaseModel):
     total: int
@@ -50,17 +89,11 @@ class EstadisticasUsuario(BaseModel):
     grupos: GruposResumen
     materias: list[MateriaResumen]
     fecha_calculo: str
-    # Solo aparecen cuando alguna dependencia no respondió y se sirve la caché (contrato I.7).
-    # Zod descarta claves desconocidas por defecto, así que no rompen estadisticasUsuarioSchema.
-    en_cache: bool | None = None
-    actualizado_en: str | None = None
-    dependencias_no_disponibles: list[str] | None = None
 
 
 class EstadisticasMateria(BaseModel):
     materia_id: int
     nombre: str
-    nrc: str | None = None
     periodo: str | None = None
     tareas: TareasResumen
     grupos: GruposResumen
@@ -74,15 +107,3 @@ class EstadisticasGrupo(BaseModel):
     integrantes: int
     tareas: TareasResumen
     fecha_calculo: str
-
-
-class CatalogoItem(BaseModel):
-    id: int
-    nombre: str
-    extra: str | None = None
-
-
-class ErrorRespuesta(BaseModel):
-    codigo: int
-    mensaje: str
-    dependencia: str | None = None

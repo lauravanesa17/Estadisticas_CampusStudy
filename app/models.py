@@ -8,6 +8,8 @@ from app.services.tiempo import ahora
 
 
 class EventoRecibido(Base):
+    """Eventos ya procesados: si llega uno repetido, no se vuelve a aplicar (idempotencia)."""
+
     __tablename__ = "eventos_recibidos"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -15,15 +17,6 @@ class EventoRecibido(Base):
     tipo: Mapped[str] = mapped_column(String(80), index=True)
     payload_json: Mapped[str] = mapped_column(Text)
     recibido_en: Mapped[datetime] = mapped_column(DateTime, default=ahora)
-
-
-class UsuarioProyeccion(Base):
-    __tablename__ = "usuarios"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    nombre: Mapped[str] = mapped_column(String(120), default="")
-    email: Mapped[str] = mapped_column(String(180), default="")
-    rol: Mapped[str] = mapped_column(String(40), default="estudiante")
 
 
 class MateriaProyeccion(Base):
@@ -39,8 +32,7 @@ class GrupoProyeccion(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     nombre: Mapped[str] = mapped_column(String(160), default="")
-    materia_id: Mapped[int] = mapped_column(Integer, default=0)
-    creado_por: Mapped[int] = mapped_column(Integer, default=0)
+    materia_id: Mapped[int] = mapped_column(Integer, index=True)
 
 
 class MiembroGrupo(Base):
@@ -50,31 +42,14 @@ class MiembroGrupo(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     grupo_id: Mapped[int] = mapped_column(Integer, index=True)
     usuario_id: Mapped[int] = mapped_column(Integer, index=True)
-    rol: Mapped[str] = mapped_column(String(20), default="miembro")
 
 
 class TareaProyeccion(Base):
     __tablename__ = "tareas"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    titulo: Mapped[str] = mapped_column(String(150), default="")
     usuario_id: Mapped[int] = mapped_column(Integer, index=True)
     materia_id: Mapped[int] = mapped_column(Integer, index=True)
     grupo_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
-    prioridad: Mapped[str] = mapped_column(String(20), default="media")
     estado: Mapped[str] = mapped_column(String(30), default="pendiente", index=True)
     fecha_entrega: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    fecha_completada: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    creado_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-
-
-class SincronizacionUsuario(Base):
-    """Cuándo se consultó por última vez a cada servicio para un usuario (vigencia de la caché)."""
-
-    __tablename__ = "sincronizacion_usuarios"
-
-    usuario_id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    usuario_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    tareas_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    materias_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    grupos_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

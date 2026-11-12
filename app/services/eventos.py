@@ -1,7 +1,6 @@
-import json
-import uuid
-from datetime import datetime
+from datetime import datetime, time
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -10,175 +9,67 @@ from app.models import (
     MateriaProyeccion,
     MiembroGrupo,
     TareaProyeccion,
-    UsuarioProyeccion,
 )
-from app.schemas import EventoEntrada, EventoRespuesta
-from app.services.ids import entero_id, primer_id
-from app.services.tiempo import ahora, normalizar_estado, parsear_fecha, parsear_fecha_entrega
+from app.schemas import (
+    EventoEntrada,
+    EventoRespuesta,
+    GrupoPayload,
+    MateriaPayload,
+    TareaPayload,
+)
 
-
-def aplicar_proyeccion(
-    db: Session,
-    tipo: str,
-    payload: dict,
-    occurred_at: datetime | None = None,
-    commit: bool = True,
-) -> None:
-    _aplicar(db, tipo, payload, occurred_at)
-    if commit:
-        db.commit()
+# Sin hora de entrega, la tarea vence al final del día (contrato I.6)
+FIN_DEL_DIA = time(23, 59)
 
 
 def procesar_evento(db: Session, entrada: EventoEntrada) -> EventoRespuesta:
-    evento_id = entrada.evento_id or str(uuid.uuid4())
-    existente = db.query(EventoRecibido).filter_by(evento_id=evento_id).first()
-    if existente:
-        return EventoRespuesta(
-            aceptado=True,
-            duplicado=True,
-            evento_id=evento_id,
-            tipo=entrada.evento,
-            mensaje="Evento ya procesado (idempotencia).",
-        )
+    # Idempotencia: el mismo evento dos veces (reintento de Polly, RabbitMQ) no cuenta doble
+    if db.query(EventoRecibido.id).filter_by(evento_id=entrada.evento_id).first():
+        return EventoRespuesta(evento_id=entrada.evento_id, duplicado=True)
 
-    _aplicar(db, entrada.evento, entrada.payload, entrada.occurred_at)
-    db.add(
-        EventoRecibido(
-            evento_id=evento_id,
-            tipo=entrada.evento,
-            payload_json=json.dumps(entrada.payload, default=str, ensure_ascii=False),
-            recibido_en=ahora(),
-        )
-    )
-    db.commit()
-    return EventoRespuesta(
-        aceptado=True,
-        duplicado=False,
-        evento_id=evento_id,
+    match entrada.payload:
+        case TareaPayload() as tarea:
+            _guardar_tarea(db, tarea)
+        case GrupoPayload() as grupo:
+            _guardar_grupo(db, grupo)
+        case MateriaPayload() as materia:
+            _guardar_materia(db, materia)
+
+    db.add(EventoRecibido(
+        evento_id=entrada.evento_id,
         tipo=entrada.evento,
-        mensaje="Evento aplicado a la caché local.",
-    )
+        payload_json=entrada.payload.model_dump_json(),
+    ))
+
+    try:
+        db.commit()
+    except IntegrityError:
+        # Dos copias del mismo evento llegaron al mismo tiempo: la otra ya lo aplicó
+        db.rollback()
+        return EventoRespuesta(evento_id=entrada.evento_id, duplicado=True)
+
+    return EventoRespuesta(evento_id=entrada.evento_id, duplicado=False)
 
 
-def _aplicar(db: Session, tipo: str, payload: dict, occurred_at: datetime | None) -> None:
-    manejadores = {
-        "usuario.registrado": _usuario,
-        "usuario.actualizado": _usuario,
-        "materia.creada": _materia,
-        "materia.actualizada": _materia,
-        "grupo.creado": _grupo,
-        "grupo.actualizado": _grupo,
-        "grupo.miembro_agregado": _miembro,
-        "tarea.creada": _tarea,
-        "tarea.actualizada": _tarea,
-        "tarea.estado_cambiado": _tarea,
-        "tarea.eliminada": _eliminar_tarea,
-        "tarea_creada": _tarea,
-    }
-    manejador = manejadores.get(tipo)
-    if manejador:
-        manejador(db, payload, occurred_at)
+# Cada evento trae la foto completa de la entidad: se guarda tal cual (upsert)
+
+def _guardar_tarea(db: Session, tarea: TareaPayload) -> None:
+    db.merge(TareaProyeccion(
+        id=tarea.tarea_id,
+        usuario_id=tarea.usuario_id,
+        materia_id=tarea.materia_id,
+        grupo_id=tarea.grupo_id,
+        estado=tarea.estado,
+        fecha_entrega=datetime.combine(tarea.fecha_entrega, tarea.hora_entrega or FIN_DEL_DIA),
+    ))
 
 
-def _usuario(db: Session, payload: dict, _: datetime | None) -> None:
-    usuario_id = primer_id(payload.get("usuario_id"), payload.get("usuarioId"), payload.get("id"))
-    if not usuario_id:
-        return
-    usuario = db.get(UsuarioProyeccion, usuario_id) or UsuarioProyeccion(id=usuario_id)
-    usuario.nombre = payload.get("nombre", usuario.nombre or f"Usuario {usuario_id}")
-    usuario.email = payload.get("email") or payload.get("correo") or usuario.email
-    usuario.rol = payload.get("rol", usuario.rol or "estudiante")
-    db.merge(usuario)
+def _guardar_grupo(db: Session, grupo: GrupoPayload) -> None:
+    db.merge(GrupoProyeccion(id=grupo.grupo_id, nombre=grupo.nombre, materia_id=grupo.materia_id))
 
+    # grupos-service manda la lista completa: se reemplaza la anterior
+    db.query(MiembroGrupo).filter_by(grupo_id=grupo.grupo_id).delete()
+    db.add_all(MiembroGrupo(grupo_id=grupo.grupo_id, usuario_id=i.usuario_id) for i in grupo.integrantes)
 
-def _materia(db: Session, payload: dict, _: datetime | None) -> None:
-    materia_id = primer_id(payload.get("materia_id"), payload.get("materiaId"), payload.get("id"))
-    if not materia_id:
-        return
-    materia = db.get(MateriaProyeccion, materia_id) or MateriaProyeccion(id=materia_id)
-    materia.nombre = payload.get("nombre", materia.nombre or f"Materia {materia_id}")
-    materia.nrc = str(payload.get("nrc") or payload.get("codigo") or materia.nrc or "")
-    db.merge(materia)
-
-
-def _grupo(db: Session, payload: dict, _: datetime | None) -> None:
-    grupo_id = primer_id(payload.get("grupo_id"), payload.get("grupoId"), payload.get("id"))
-    if not grupo_id:
-        return
-    grupo = db.get(GrupoProyeccion, grupo_id) or GrupoProyeccion(id=grupo_id)
-    grupo.nombre = payload.get("nombre", grupo.nombre or f"Grupo {grupo_id}")
-    grupo.materia_id = primer_id(payload.get("materia_id"), payload.get("materiaId"), grupo.materia_id) or grupo.materia_id
-    grupo.creado_por = primer_id(payload.get("creado_por"), payload.get("creadoPor"), grupo.creado_por) or grupo.creado_por
-    db.merge(grupo)
-    if not isinstance(payload.get("integrantes"), list):
-        return
-    vigentes: set[int] = set()
-    for integrante in payload["integrantes"]:
-        datos = {"grupo_id": grupo_id, **integrante} if isinstance(integrante, dict) else {"grupo_id": grupo_id, "usuario_id": integrante}
-        usuario_id = primer_id(datos.get("usuario_id"), datos.get("usuarioId"), datos.get("id"))
-        if usuario_id:
-            vigentes.add(usuario_id)
-        _miembro(db, datos, None)
-    # grupos-service envía la lista completa: quien ya no aparece salió del grupo.
-    db.flush()
-    db.query(MiembroGrupo).filter(
-        MiembroGrupo.grupo_id == grupo_id,
-        MiembroGrupo.usuario_id.notin_(vigentes),
-    ).delete(synchronize_session=False)
-
-
-def _miembro(db: Session, payload: dict, _: datetime | None) -> None:
-    grupo_id = primer_id(payload.get("grupo_id"), payload.get("grupoId"))
-    usuario_id = primer_id(payload.get("usuario_id"), payload.get("usuarioId"), payload.get("id"))
-    if not grupo_id or not usuario_id:
-        return
-    ya = db.query(MiembroGrupo).filter_by(grupo_id=grupo_id, usuario_id=usuario_id).first()
-    if ya:
-        if payload.get("rol"):
-            ya.rol = payload["rol"]
-        return
-    db.add(MiembroGrupo(grupo_id=grupo_id, usuario_id=usuario_id, rol=payload.get("rol", "miembro")))
-
-
-def _tarea(db: Session, payload: dict, occurred_at: datetime | None) -> None:
-    tarea_id = primer_id(payload.get("tarea_id"), payload.get("tareaId"), payload.get("id"))
-    if not tarea_id:
-        return
-    tarea = db.get(TareaProyeccion, tarea_id) or TareaProyeccion(id=tarea_id)
-    if payload.get("titulo"):
-        tarea.titulo = payload["titulo"]
-    usuario_id = primer_id(payload.get("usuario_id"), payload.get("usuarioId"), payload.get("creadoPor"))
-    if usuario_id:
-        tarea.usuario_id = usuario_id
-    materia_id = primer_id(payload.get("materia_id"), payload.get("materiaId"))
-    if materia_id:
-        tarea.materia_id = materia_id
-    if "grupo_id" in payload or "grupoId" in payload:
-        tarea.grupo_id = entero_id(payload.get("grupo_id", payload.get("grupoId")))
-    if payload.get("prioridad"):
-        tarea.prioridad = payload["prioridad"]
-    if payload.get("estado"):
-        tarea.estado = normalizar_estado(payload["estado"])
-    if "fecha_entrega" in payload or "fechaEntrega" in payload:
-        tarea.fecha_entrega = parsear_fecha_entrega(
-            payload.get("fecha_entrega") or payload.get("fechaEntrega"),
-            payload.get("hora_entrega") or payload.get("horaEntrega"),
-        )
-    if "fecha_completada" in payload or "fechaCompletada" in payload:
-        tarea.fecha_completada = parsear_fecha(payload.get("fecha_completada") or payload.get("fechaCompletada"))
-    elif tarea.estado == "completada" and not tarea.fecha_completada:
-        tarea.fecha_completada = parsear_fecha(occurred_at) or ahora()
-    if not tarea.creado_en:
-        tarea.creado_en = parsear_fecha(payload.get("fecha_creacion") or payload.get("creadoEn")) or ahora()
-    if not tarea.usuario_id:
-        tarea.usuario_id = 0
-    if not tarea.materia_id:
-        tarea.materia_id = 0
-    db.merge(tarea)
-
-
-def _eliminar_tarea(db: Session, payload: dict, _: datetime | None) -> None:
-    tarea_id = primer_id(payload.get("tarea_id"), payload.get("tareaId"), payload.get("id"))
-    tarea = db.get(TareaProyeccion, tarea_id) if tarea_id else None
-    if tarea:
-        db.delete(tarea)
+def _guardar_materia(db: Session, materia: MateriaPayload) -> None:
+    db.merge(MateriaProyeccion(id=materia.materia_id, nombre=materia.nombre, nrc=materia.nrc))
