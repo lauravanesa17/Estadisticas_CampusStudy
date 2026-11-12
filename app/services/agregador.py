@@ -114,19 +114,24 @@ def estadisticas_usuario(
     )
 
 
-def estadisticas_materia(db: Session, materia_id: int, periodo: str | None = None) -> EstadisticasMateria | None:
-    materia = db.get(MateriaProyeccion, materia_id)
-    if not materia:
+def estadisticas_materia(
+    db: Session,
+    materia_id: int,
+    usuario_id: int,
+    periodo: str | None = None,
+) -> EstadisticasMateria | None:
+    if not _puede_ver_materia(db, materia_id, usuario_id):
         return None
 
     momento = ahora()
+    materia = db.get(MateriaProyeccion, materia_id)
     tareas = _tareas(db, materia_id=materia_id, periodo=periodo)
     grupos = db.query(GrupoProyeccion).filter_by(materia_id=materia_id).count()
 
     return EstadisticasMateria(
         materia_id=materia_id,
-        nombre=materia.nombre,
-        nrc=materia.nrc or None,
+        nombre=materia.nombre if materia else f"Materia {materia_id}",
+        nrc=materia.nrc if materia else None,
         periodo=periodo,
         tareas=resumen_tareas(tareas, momento),
         grupos=GruposResumen(total_grupos=grupos, grupos_activos=len(_grupos_activos(tareas, momento))),
@@ -134,9 +139,9 @@ def estadisticas_materia(db: Session, materia_id: int, periodo: str | None = Non
     )
 
 
-def estadisticas_grupo(db: Session, grupo_id: int) -> EstadisticasGrupo | None:
+def estadisticas_grupo(db: Session, grupo_id: int, usuario_id: int) -> EstadisticasGrupo | None:
     grupo = db.get(GrupoProyeccion, grupo_id)
-    if not grupo:
+    if not grupo or not _es_integrante(db, grupo_id, usuario_id):
         return None
 
     return EstadisticasGrupo(
@@ -147,3 +152,21 @@ def estadisticas_grupo(db: Session, grupo_id: int) -> EstadisticasGrupo | None:
         tareas=resumen_tareas(_tareas(db, grupo_id=grupo_id), ahora()),
         fecha_calculo=hoy_iso(),
     )
+
+
+# ---------- Quién puede ver qué (si no puede, la misma respuesta que "no existe") ----------
+
+def _es_integrante(db: Session, grupo_id: int, usuario_id: int) -> bool:
+    return db.query(MiembroGrupo.id).filter_by(grupo_id=grupo_id, usuario_id=usuario_id).first() is not None
+
+
+def _puede_ver_materia(db: Session, materia_id: int, usuario_id: int) -> bool:
+    """La materia es suya (tiene tareas en ella) o la comparte en un grupo."""
+    tiene_tareas = db.query(TareaProyeccion.id).filter_by(materia_id=materia_id, usuario_id=usuario_id).first()
+    en_grupo = (
+        db.query(MiembroGrupo.id)
+        .join(GrupoProyeccion, GrupoProyeccion.id == MiembroGrupo.grupo_id)
+        .filter(GrupoProyeccion.materia_id == materia_id, MiembroGrupo.usuario_id == usuario_id)
+        .first()
+    )
+    return tiene_tareas is not None or en_grupo is not None
