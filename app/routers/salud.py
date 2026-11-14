@@ -3,7 +3,7 @@ from fastapi import APIRouter
 router = APIRouter(tags=["salud"])
 
 
-@router.get("/salud")
+@router.get("/health")
 def salud() -> dict:
     return {
         "servicio": "estadisticas",
