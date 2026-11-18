@@ -1,51 +1,42 @@
 def _registrar_base(client):
     client.post("/api/v1/eventos", json={
-        "evento_id": "u-25",
-        "evento": "usuario.registrado",
-        "payload": {"usuario_id": 25, "nombre": "Ana", "email": "ana@uniminuto.edu.co"},
-    })
-    client.post("/api/v1/eventos", json={
         "evento_id": "m-4",
         "evento": "materia.creada",
         "payload": {"materia_id": 4, "nombre": "Sistemas Distribuidos", "nrc": "12345"},
     })
 
 
+def _tarea(client, evento_id, tarea_id, estado, fecha, materia_id=4, grupo_id=None, hora=None):
+    payload = {
+        "tarea_id": tarea_id,
+        "usuario_id": 25,
+        "materia_id": materia_id,
+        "estado": estado,
+        "fecha_entrega": fecha,
+    }
+    if grupo_id is not None:
+        payload["grupo_id"] = grupo_id
+    if hora is not None:
+        payload["hora_entrega"] = hora
+    return client.post("/api/v1/eventos", json={
+        "evento_id": evento_id,
+        "evento": "tarea.creada",
+        "payload": payload,
+    })
+
+
 def test_salud(client):
-    respuesta = client.get("/salud")
+    respuesta = client.get("/health")
     assert respuesta.status_code == 200
     assert respuesta.json()["servicio"] == "estadisticas"
 
 
 def test_reporte_usuario_cumple_contrato_frontend(client):
     _registrar_base(client)
-    client.post("/api/v1/eventos", json={
-        "evento_id": "t-15",
-        "evento": "tarea.creada",
-        "payload": {
-            "tarea_id": 15,
-            "titulo": "Contrato de interfaz",
-            "usuario_id": 25,
-            "materia_id": 4,
-            "fecha_entrega": "2026-12-01",
-            "hora_entrega": "18:00",
-            "estado": "completada",
-        },
-    })
-    client.post("/api/v1/eventos", json={
-        "evento_id": "t-16",
-        "evento": "tarea.creada",
-        "payload": {
-            "tarea_id": 16,
-            "titulo": "Pendiente",
-            "usuario_id": 25,
-            "materia_id": 4,
-            "fecha_entrega": "2026-12-20",
-            "estado": "pendiente",
-        },
-    })
+    _tarea(client, "t-15", 15, "completada", "2026-12-01", hora="18:00")
+    _tarea(client, "t-16", 16, "pendiente", "2026-12-20")
 
-    respuesta = client.get("/api/v1/estadisticas/usuario/25")
+    respuesta = client.get("/api/v1/estadisticas/me")
     assert respuesta.status_code == 200
     cuerpo = respuesta.json()
     assert cuerpo["usuario_id"] == 25
@@ -64,19 +55,8 @@ def test_reporte_usuario_cumple_contrato_frontend(client):
 
 def test_tarea_vencida_es_conteo_derivado(client):
     _registrar_base(client)
-    client.post("/api/v1/eventos", json={
-        "evento_id": "t-vencida",
-        "evento": "tarea.creada",
-        "payload": {
-            "tarea_id": 99,
-            "titulo": "Ya se venció",
-            "usuario_id": 25,
-            "materia_id": 4,
-            "estado": "pendiente",
-            "fecha_entrega": "2026-01-01",
-        },
-    })
-    cuerpo = client.get("/api/v1/estadisticas/usuario/25").json()
+    _tarea(client, "t-vencida", 99, "pendiente", "2026-01-01")
+    cuerpo = client.get("/api/v1/estadisticas/me").json()
     assert cuerpo["tareas"]["vencidas"] == 1
     assert cuerpo["tareas"]["pendientes"] == 0
     assert cuerpo["tareas"]["completadas"] == 0
@@ -84,19 +64,8 @@ def test_tarea_vencida_es_conteo_derivado(client):
 
 def test_en_progreso_cuenta_como_pendiente_en_el_contrato_del_front(client):
     _registrar_base(client)
-    client.post("/api/v1/eventos", json={
-        "evento_id": "t-prog",
-        "evento": "tarea.creada",
-        "payload": {
-            "tarea_id": 40,
-            "titulo": "En curso",
-            "usuario_id": 25,
-            "materia_id": 4,
-            "estado": "en_progreso",
-            "fecha_entrega": "2026-12-01",
-        },
-    })
-    cuerpo = client.get("/api/v1/estadisticas/usuario/25").json()
+    _tarea(client, "t-prog", 40, "en_progreso", "2026-12-01")
+    cuerpo = client.get("/api/v1/estadisticas/me").json()
     assert cuerpo["tareas"]["pendientes"] == 1
     assert "en_progreso" not in cuerpo["tareas"]
 
@@ -108,7 +77,6 @@ def test_idempotencia_de_eventos(client):
         "evento": "tarea.creada",
         "payload": {
             "tarea_id": 70,
-            "titulo": "Duplicada",
             "usuario_id": 25,
             "materia_id": 4,
             "estado": "pendiente",
@@ -119,18 +87,37 @@ def test_idempotencia_de_eventos(client):
     segunda = client.post("/api/v1/eventos", json=evento)
     assert primera.json()["duplicado"] is False
     assert segunda.json()["duplicado"] is True
-    assert client.get("/api/v1/estadisticas/usuario/25").json()["tareas"]["total"] == 1
+    assert client.get("/api/v1/estadisticas/me").json()["tareas"]["total"] == 1
 
 
-def test_usuario_inexistente_404(client):
-    respuesta = client.get("/api/v1/estadisticas/usuario/999")
-    assert respuesta.status_code == 404
-    assert respuesta.json()["codigo"] == 404
-    assert "mensaje" in respuesta.json()
+def test_sin_token_no_entra(client):
+    del client.headers["Authorization"]
+    respuesta = client.get("/api/v1/estadisticas/me")
+    assert respuesta.status_code == 401
+    assert respuesta.json()["codigo"] == 401
+
+
+def test_token_invalido_401(client):
+    client.headers["Authorization"] = "Bearer no-es-un-jwt"
+    respuesta = client.get("/api/v1/estadisticas/me")
+    assert respuesta.status_code == 401
+    assert respuesta.json()["codigo"] == 401
+
+
+def test_otro_usuario_no_ve_tareas_ajenas(client):
+    from tests.conftest import token_para
+
+    _registrar_base(client)
+    _tarea(client, "t-15", 15, "completada", "2026-12-01")
+    client.headers["Authorization"] = f"Bearer {token_para(30, 'Luis')}"
+    cuerpo = client.get("/api/v1/estadisticas/me").json()
+    assert cuerpo["usuario_id"] == 30
+    assert cuerpo["nombre"] == "Luis"
+    assert cuerpo["tareas"]["total"] == 0
 
 
 def test_parametro_invalido_400(client):
-    respuesta = client.get("/api/v1/estadisticas/usuario/abc")
+    respuesta = client.get("/api/v1/estadisticas/materia/abc")
     assert respuesta.status_code == 400
     assert respuesta.json()["codigo"] == 400
 
@@ -142,23 +129,9 @@ def test_filtro_materia_en_query(client):
         "evento": "materia.creada",
         "payload": {"materia_id": 12, "nombre": "Bases de Datos", "nrc": "30210"},
     })
-    client.post("/api/v1/eventos", json={
-        "evento_id": "t-a",
-        "evento": "tarea.creada",
-        "payload": {
-            "tarea_id": 1, "titulo": "A", "usuario_id": 25, "materia_id": 4,
-            "estado": "completada", "fecha_entrega": "2026-12-01",
-        },
-    })
-    client.post("/api/v1/eventos", json={
-        "evento_id": "t-b",
-        "evento": "tarea.creada",
-        "payload": {
-            "tarea_id": 2, "titulo": "B", "usuario_id": 25, "materia_id": 12,
-            "estado": "pendiente", "fecha_entrega": "2026-12-01",
-        },
-    })
-    cuerpo = client.get("/api/v1/estadisticas/usuario/25?materia_id=4").json()
+    _tarea(client, "t-a", 1, "completada", "2026-12-01", materia_id=4)
+    _tarea(client, "t-b", 2, "pendiente", "2026-12-01", materia_id=12)
+    cuerpo = client.get("/api/v1/estadisticas/me?materia_id=4").json()
     assert cuerpo["tareas"]["total"] == 1
     assert cuerpo["materias"][0]["materia_id"] == 4
 
@@ -172,58 +145,67 @@ def test_reporte_grupo(client):
             "grupo_id": 7,
             "nombre": "Grupo de estudio - Sistemas Distribuidos",
             "materia_id": 4,
-            "creado_por": 25,
-            "integrantes": [{"usuario_id": 25, "rol": "lider"}],
+            "integrantes": [{"usuario_id": 25}],
         },
     })
-    client.post("/api/v1/eventos", json={
-        "evento_id": "t-g",
-        "evento": "tarea.creada",
-        "payload": {
-            "tarea_id": 55,
-            "titulo": "Grupal",
-            "usuario_id": 25,
-            "materia_id": 4,
-            "grupo_id": 7,
-            "estado": "completada",
-            "fecha_entrega": "2026-10-10",
-        },
-    })
+    _tarea(client, "t-g", 55, "completada", "2026-10-10", grupo_id=7)
     cuerpo = client.get("/api/v1/estadisticas/grupo/7").json()
     assert cuerpo["grupo_id"] == 7
     assert cuerpo["integrantes"] == 1
     assert cuerpo["tareas"]["completadas"] == 1
 
 
+def test_grupo_ajeno_404(client):
+    from tests.conftest import token_para
+
+    client.post("/api/v1/eventos", json={
+        "evento_id": "g-7",
+        "evento": "grupo.creado",
+        "payload": {
+            "grupo_id": 7,
+            "nombre": "Grupo cerrado",
+            "materia_id": 4,
+            "integrantes": [{"usuario_id": 25}],
+        },
+    })
+    client.headers["Authorization"] = f"Bearer {token_para(30, 'Luis')}"
+    respuesta = client.get("/api/v1/estadisticas/grupo/7")
+    assert respuesta.status_code == 404
+    assert respuesta.json()["codigo"] == 404
+
+
 def test_filtro_periodo(client):
     _registrar_base(client)
-    for tarea_id, fecha in ((1, "2026-11-05"), (2, "2026-12-05")):
-        client.post("/api/v1/eventos", json={
-            "evento_id": f"t-{tarea_id}",
-            "evento": "tarea.creada",
-            "payload": {"tarea_id": tarea_id, "titulo": "P", "usuario_id": 25, "materia_id": 4,
-                        "estado": "pendiente", "fecha_entrega": fecha},
-        })
-    cuerpo = client.get("/api/v1/estadisticas/usuario/25?periodo=2026-11").json()
+    _tarea(client, "t-1", 1, "pendiente", "2026-11-05")
+    _tarea(client, "t-2", 2, "pendiente", "2026-12-05")
+    cuerpo = client.get("/api/v1/estadisticas/me?periodo=2026-11").json()
     assert cuerpo["periodo"] == "2026-11"
     assert cuerpo["tareas"]["total"] == 1
 
 
 def test_periodo_invalido_400(client):
-    assert client.get("/api/v1/estadisticas/usuario/25?periodo=2026-1").status_code == 400
+    assert client.get("/api/v1/estadisticas/me?periodo=2026-1").status_code == 400
 
 
 def test_reporte_materia(client):
     _registrar_base(client)
-    client.post("/api/v1/eventos", json={
-        "evento_id": "t-m",
-        "evento": "tarea.creada",
-        "payload": {"tarea_id": 5, "titulo": "M", "usuario_id": 25, "materia_id": 4,
-                    "estado": "completada", "fecha_entrega": "2026-10-10"},
-    })
-    cuerpo = client.get("/api/v1/estadisticas/materia/4").json()
-    assert cuerpo["nrc"] == "12345"
+    _tarea(client, "t-m", 5, "completada", "2026-10-10")
+    respuesta = client.get("/api/v1/estadisticas/materia/4")
+    assert respuesta.status_code == 200
+    cuerpo = respuesta.json()
+    assert cuerpo["nombre"] == "Sistemas Distribuidos"
     assert cuerpo["tareas"]["porcentaje_completado"] == 100.0
+
+
+def test_materia_ajena_404(client):
+    from tests.conftest import token_para
+
+    _registrar_base(client)
+    _tarea(client, "t-m", 5, "completada", "2026-10-10")
+    client.headers["Authorization"] = f"Bearer {token_para(30, 'Luis')}"
+    respuesta = client.get("/api/v1/estadisticas/materia/4")
+    assert respuesta.status_code == 404
+    assert respuesta.json()["codigo"] == 404
 
 
 def test_ruta_inexistente_usa_formato_de_error(client):

@@ -1,18 +1,32 @@
 import os
 
-os.environ["SEED_ON_START"] = "false"
-os.environ["DATABASE_URL"] = "sqlite:///:memory:"
+os.environ["DATABASE_URL"] = "sqlite://"
+os.environ["JWT_SECRET"] = "secret-pruebas-campusstudy-valido"
 
 from datetime import datetime
 
-import httpx
+import jwt
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
+import app.database as database
 from app.config import settings
-from app.database import Base, engine, get_db, SessionLocal
+from app.database import Base, get_db
 from app.main import app
-from app.services import sincronizacion, tiempo
+from app.services import tiempo
+
+# Una sola conexión en memoria: si no, cada request vería una base vacía.
+engine = create_engine(
+    "sqlite://",
+    connect_args={"check_same_thread": False},
+    poolclass=StaticPool,
+)
+SessionLocal = sessionmaker(bind=engine, autoflush=False)
+database.engine = engine
+database.SessionLocal = SessionLocal
 
 # Fecha fija para que las pruebas no dependan del día en que se corren.
 AHORA_PRUEBAS = datetime(2026, 10, 12, 10, 0, tzinfo=tiempo.ZONA_COLOMBIA)
@@ -26,18 +40,20 @@ class Reloj:
         return self.momento
 
 
+def token_para(usuario_id: int = 25, nombre: str = "Ana") -> str:
+    return jwt.encode(
+        {"sub": str(usuario_id), "nombre": nombre},
+        settings.jwt_secret,
+        algorithm="HS256",
+    )
+
+
 @pytest.fixture(autouse=True)
 def reloj(monkeypatch):
     """Congela tiempo.ahora(). Para mover el reloj: reloj.momento = datetime(..., tzinfo=ZONA_COLOMBIA)."""
     fijo = Reloj(AHORA_PRUEBAS)
     monkeypatch.setattr(tiempo, "_reloj", fijo)
     return fijo
-
-
-@pytest.fixture(autouse=True)
-def sin_servicios_externos(monkeypatch):
-    for nombre in ("usuarios_service_url", "materias_service_url", "tareas_service_url", "grupos_service_url", "servicio_token"):
-        monkeypatch.setattr(settings, nombre, "")
 
 
 @pytest.fixture
@@ -54,43 +70,6 @@ def client():
 
     app.dependency_overrides[get_db] = override_get_db
     with TestClient(app) as test_client:
+        test_client.headers["Authorization"] = f"Bearer {token_para()}"
         yield test_client
     app.dependency_overrides.clear()
-
-
-@pytest.fixture
-def servicios(monkeypatch):
-    """Simula usuarios/tareas/materias/grupos con httpx.MockTransport.
-
-    `servicios.rutas[(host, path)]` = cuerpo JSON, un código de estado (int) o una función(request).
-    `servicios.caidos` = hosts que no responden (error de conexión).
-    """
-
-    class Simulados:
-        def __init__(self) -> None:
-            self.rutas: dict[tuple[str, str], object] = {}
-            self.caidos: set[str] = set()
-            self.peticiones: list[httpx.Request] = []
-
-        def manejar(self, request: httpx.Request) -> httpx.Response:
-            self.peticiones.append(request)
-            if request.url.host in self.caidos:
-                raise httpx.ConnectError("conexión rechazada", request=request)
-            respuesta = self.rutas.get((request.url.host, request.url.path), 404)
-            if callable(respuesta):
-                respuesta = respuesta(request)
-            if isinstance(respuesta, int):
-                return httpx.Response(respuesta, json={"codigo": respuesta, "mensaje": "simulado"})
-            return httpx.Response(200, json=respuesta)
-
-    simulados = Simulados()
-    monkeypatch.setattr(settings, "usuarios_service_url", "http://usuarios")
-    monkeypatch.setattr(settings, "tareas_service_url", "http://tareas")
-    monkeypatch.setattr(settings, "materias_service_url", "http://materias")
-    monkeypatch.setattr(settings, "grupos_service_url", "http://grupos")
-    monkeypatch.setattr(
-        sincronizacion,
-        "_crear_cliente",
-        lambda: httpx.Client(transport=httpx.MockTransport(simulados.manejar)),
-    )
-    return simulados
